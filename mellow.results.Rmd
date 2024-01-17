@@ -1,0 +1,269 @@
+---
+title: "Mellow Channel Views Analysis"
+author: "Sage P."
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+```
+
+For this analysis I was interested in extracting variables from Mellow Climbing's
+Youtube channel in order to make inference on what may effect views a video gets
+and to see if I can predict views a video will get. This is interesting as it 
+potentially shows what people like seeing in the bouldering (and rope to some 
+extent) world and I suppose could be of use in a business sense to Mellow or any
+other climbing channel looking for views if they are into that.
+
+Mellow is a channel (and brand) ran by professional boulderers who wanted a place
+to post footage of hard climbing with a sentiment of "by climbers for climbers".
+It has a combination of bouldering and sport climbing, short "uncut"footage of sends
+and longer films of either the progress on a hard climb, multiple climbs, or multiple
+people with any combination. I thought it would be interesting to see if I can 
+extract some basic info about the video and see if I can predict if a video will 
+get a lot of views or not. 
+
+To start, I used Youtubes API to access Mellows videos, likes/comments/views,
+titles, description and date posted. I then did feature extraction to create
+potentially useful variables such as vgrade, uncut or not, gender of the climber,
+sport or boulder, time since video was posted and more. This was done in September 
+2023 and therefore only includes data from videos up until that point.
+
+
+``` {r, message = FALSE}
+library(tidyverse)
+library(psych)
+library(corrplot)
+library(patchwork)
+library(randomForest)
+library(Metrics)
+
+raw <- read_csv("/Users/sagepletka/Documents/GitHub/mellow.analysis/channeldata.csv")
+
+
+head(raw)
+```
+
+Summary Stats on views:
+
+```{r, echo = FALSE}
+describe(raw$viewCount)
+```
+
+Data preparation:
+```{r}
+prep <- raw %>% mutate(uncut = if_else(uncut == "no", 0, 1)) %>%
+  mutate(vgrade = as.numeric(str_sub(vgrade, 2, 3))) %>%
+  mutate(vgrade = if_else(is.na(vgrade), 1, vgrade)) %>%
+  mutate(vgrade = as.factor(vgrade)) %>%
+  mutate(length_film = if_else(length_film == "no", 0, 1)) %>%
+  mutate(gender = case_match(gender, "Male" ~ 1,
+                             "Female" ~ 2,
+                             "Mix" ~ 3)) %>%
+  mutate(gender = as.factor(gender)) %>%
+  mutate(sport = if_else(climb_type == "sport", 1, 0)) %>%
+  mutate(boulder = if_else(climb_type == "boulder", 1, 0)) %>% 
+  mutate(multi_climbs = if_else(multi_climbs == "no", 0, 1)) %>%
+  mutate(group = if_else(group == "solo", 0, 1)) %>%
+  mutate(days_since_upload = if_else(!is.na(date), as.numeric(as.Date("2023-10-01")-date), NA))
+```
+
+Independent variables used:
+
+``` {r, echo = FALSE}
+colnames(prep[c(7, 8, 9, 10, 11, 12, 13, 16)])
+```
+
+Correlations between likes/views/comments were expectantly very high: 
+
+``` {r, echo = FALSE}
+cor(prep[ , c(3, 4, 5)])
+```
+
+
+Some Data viz to better understand relationships between the dependents and independents:
+
+``` {r, include = FALSE, message = FALSE}
+view <- ggplot(raw, aes(viewCount)) + geom_histogram(fill = "red") + 
+  theme_classic() + theme(axis.text.x = element_text(angle = 90))
+grade <- ggplot(raw, aes(vgrade)) + geom_bar(fill = "red") + 
+  theme_classic() + theme(axis.text.x = element_text(angle = 90))
+type <- ggplot(raw, aes(climb_type)) + geom_bar(fill = "red") + theme_classic()
+group <- ggplot(raw, aes(group)) + geom_bar(fill = "red") + theme_classic()
+length <- ggplot(raw, aes(length_film)) + geom_bar(fill = "red") + theme_classic()
+gender <- ggplot(raw, aes(gender)) + geom_bar(fill = "red") + theme_classic()
+```
+```{r, echo = FALSE, message = FALSE}
+gridviz <- view + grade + type + group + gender + length
+gridviz
+```
+``` {r, include = FALSE, message = FALSE}
+viewgrade <- ggplot(prep, aes(viewCount)) + geom_histogram(aes(fill = vgrade)) + 
+  theme_classic() + theme(axis.text.x = element_text(angle = 90))
+viewtype <- ggplot(raw, aes(viewCount)) + geom_histogram(aes(fill = climb_type)) + 
+  theme_classic() + theme(axis.text.x = element_text(angle = 90))
+viewgender <- ggplot(raw, aes(viewCount)) + geom_histogram(aes(fill = gender)) + 
+  theme_classic() + theme(axis.text.x = element_text(angle = 90))
+viewunmcut <- ggplot(raw, aes(viewCount)) + geom_histogram(aes(fill = uncut)) + 
+  theme_classic() + theme(axis.text.x = element_text(angle = 90))
+```
+``` {r, echo = FALSE, message = FALSE}
+grid_view <- viewgrade + viewtype + viewgender + viewunmcut
+grid_view
+```
+
+With exception to days since video upload, all of my dependents are categorical 
+variables which is going to make precise prediction or explanation of the variation
+in views not possible, however it may still be interesting to consider what variables
+are important and in what direction and magnitude, and to what extent we could 
+predict views.
+
+To make inference on the independent variables, I used linear regression using the 
+poisson link function for the count data with a heavy right skew
+
+```{r}
+all_pois <- glm(viewCount ~ uncut + gender + sport + days_since_upload + group +
+                  multi_climbs + length_film + vgrade,
+                data = prep, family = "poisson")
+```
+```{r, echo = FALSE}
+summary(all_pois)
+```
+
+All variables were significant contributors to view count. Of note is the large 
+negative effect of uncut videos and of lower v-grades which even out around v15
+and then become positive at v16. Female climber videos do better than
+males. Both having multiple climbers and boulders have a small effect. 
+Interestingly sport climbing does better than boulders, although the number of 
+sport videos is smaller. Length film not computed as it is linearly dependent. 
+The poisson regression coefficients can be interpreted as for each unit change in
+the independent variables, the expected dependent variable logged will change by
+that coefficient. 
+
+
+Next I ran both random forest regression and poisson glm regression to predict views using 
+the above variables minus length film. 25% of the data was pulled as a test set 
+for the models and models were compared by RMSE and variance explained.
+
+Creating train and test sets:
+```{R}
+rf_data <- prep %>% select(viewCount,uncut, gender, climb_type, days_since_upload, group, multi_climbs, vgrade)
+
+set.seed(16)
+sample_rf <- sample(1:nrow(rf_data), size = .75 * nrow(rf_data), replace = FALSE)
+train_rf <- rf_data[sample_rf, ]
+test_rf <- rf_data[-sample_rf, ]
+```
+
+
+Training and testing the random forest algorithm first with the default 500 trees
+```{R}
+set.seed(500)
+rf <- randomForest(viewCount ~ ., data = train_rf)
+rf
+```
+```{R, echo = FALSE}
+plot(rf)
+```
+
+Reducing trees to 100
+```{R}
+set.seed(500)
+rf_reduced <- randomForest(viewCount ~ ., data = train_rf, ntree = 100) 
+rf_reduced
+```
+```{R, echo = FALSE}
+plot(rf_reduced)
+```
+
+
+
+Variable importance in the random forest algorithm with 100 trees
+```{R, echo = FALSE, fig.align = "center"}
+varImpPlot(rf_reduced)
+```
+
+
+Next I trained the poisson model from the training set
+```{R}
+poisson_train <- glm(viewCount ~ ., data = train_rf, family = "poisson")
+```
+
+
+Running the models on the test set and computing RMSE: 
+```{R}
+
+#random forest
+test_num <- tibble(predict(rf_reduced, test_rf[ , -1]))
+comp <- test_num %>% mutate(actual = test_rf[ , 1])
+mean_test_rf <- sum(comp$actual)/nrow(comp$actual)
+rss_rf <- sum((comp$actual - comp$`predict(rf_reduced, test_rf[, -1])`)^2)
+tss_rf <-sum((comp$actual - mean_test_rf)^2)
+actual_rf <- pull(comp$actual)
+predicted_rf <- comp$`predict(rf_reduced, test_rf[, -1])`
+rmse_rf <- rmse(actual_rf, predicted_rf)
+
+#poisson glm
+pois_test <- tibble(predict(poisson_train, test_rf[ , -1], type = "response"))
+pois_compare <- pois_test %>% mutate(actual = test_rf[ , 1])
+actual_pois <- pull(pois_compare$actual)
+predicted_pois <- pois_compare$`predict(poisson_train, test_rf[, -1], type = "response")`
+rmse_pois <- rmse(actual_pois, predicted_pois)
+```
+
+Random forest RMSE:
+```{R, echo = FALSE}
+rmse_rf
+```
+
+Poisson GLM RMSE:
+```{R, echo = FALSE}
+rmse_pois
+```
+
+Both are quite high and similar, thought the random forest algorithm is just barely
+better. The RMSE was nearly the standard deviation of views (85845)
+
+I was also interested to understand the spread of residuals to see if there was 
+patterned bias
+
+```{R, echo = FALSE}
+rf_residual <- tibble(actual_rf, predicted_rf) %>% mutate(residual = actual_rf - predicted_rf)
+rf_residual_plot <- ggplot(rf_residual, aes(actual_rf, residual)) + geom_point()
+rf_residual_plot
+
+pois_residual <- tibble(actual_pois, predicted_pois) %>% mutate(residual = actual_pois - predicted_pois)
+pois_residual_plot <- ggplot(pois_residual, aes(actual_pois, residual)) + geom_point()
+pois_residual_plot
+```
+
+Both models tended to overestimate at lower levels of the views and underestimate
+at higher levels. This suggests that to some extent neither model was a good reflection 
+of the data. This may be because of sparce nature of some of the levels of various 
+independent variables, and potentially the slight over dispersion for the poisson 
+regression. 
+Additionally, there was only so much power in my independent variables as most were
+nominal data with few levels. 
+
+In conclusion, there was some prediction power in things like grade sent, who sent,
+what type of video editing was used, what type of climb, and obviously how long it
+has been since the video had been uploaded. These variables did not explain much
+of the data however (15% according to the random forest output) which is to be
+expected to some degree. I was not surprised that boulders under v16 got less than
+over and that uncut videos don't do very well. I was a bit more surprised that 
+sport climbs do generally well considering the channel and owners are known more
+as boulderers. 
+
+It might have been interesting to extract/use more variables such as home country
+of climber and even use Instagram follower numbers of the climbers in the videos 
+as one could conceive that people with bigger followings and from countries that 
+consume a lot of climbing media would tend to have higher views. This might help
+the the non-random residuals as well, as the residuals seemed to get higher with 
+higher actual views.
+
+Another thing to note is that I did not include interaction effects in my models.
+This was in part due to the small sample size and high number of variables already
+included. Interactions between vgrade and feature film or even interactions between
+those two and country of origin or climbers social media following would be interesting
+to try. 
